@@ -15,7 +15,7 @@ Everything below ships with a standard Omarchy install:
 - A terminal launched through `xdg-terminal-exec` (Foot, Alacritty, Ghostty, Kitty)
 - `hyprctl`, `jq` and `socat`, used by the launcher to focus an existing window and to float, center or fullscreen a new one
 
-Color needs a 256-color terminal. No packages are installed and nothing runs with `sudo`.
+Color needs a 256-color terminal. No packages are installed and nothing needs root privileges.
 
 ## Install
 
