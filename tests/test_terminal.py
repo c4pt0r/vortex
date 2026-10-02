@@ -48,6 +48,11 @@ class TerminalTests(unittest.TestCase):
                     os.write(master, b' ')
                     output += drain(master, .3)
                     self.assertEqual(drain(master), b'')
+                    # Focus reports (sent whole, as a terminal does) must not read as Esc.
+                    for report in (b'\x1b[O', b'\x1b[I'):
+                        os.write(master, report)
+                        output += drain(master)
+                        self.assertIsNone(process.poll())
                     for key in b'omcjsvktylwnx19r+hp[]ip]i\t\x1b':
                         os.write(master, bytes([key]))
                         output += drain(master)

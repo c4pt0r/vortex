@@ -2,7 +2,7 @@
 """ZERO / VORTEX — thirteen full-terminal ASCII flow studies, using only Python's stdlib.
 
 Run: python3 vortex.py [--mode smoke|river|shear|turbulence|ocean|monsoon|cyclone|jupiter] [--no-hud]
-Options: --fps 30 --mono --aspect 0.5 (character width / height) --color psychedelic
+Options: --fps 15 --idle-fps 5 --mono --aspect 0.5 (character width / height) --color psychedelic
 Keys: Y taichi; L solution; W whirlpool; N nebula; X matrix.
       O ocean; M monsoon; C cyclone; J Jupiter;
       S smoke; V river; K shear; T turbulence; Tab next.
@@ -34,6 +34,8 @@ def noise(x, y):
 
 
 MODES = ("ocean", "monsoon", "cyclone", "jupiter", "smoke", "river", "shear", "turbulence", "taichi", "solution", "whirlpool", "nebula", "matrix")
+# Terminal focus reports (xterm mode 1004), which curses delivers as kxIN / kxOUT.
+FOCUS_REPORTING_ON, FOCUS_REPORTING_OFF = "\033[?1004h", "\033[?1004l"
 MODE_KEYS = {ord("o"): "ocean", ord("m"): "monsoon",
              ord("c"): "cyclone", ord("j"): "jupiter",
              ord("s"): "smoke", ord("v"): "river",
@@ -394,45 +396,62 @@ class Field:
     def advance(self, dt):
         # Limited MacCormack transport: forward then backward tracing estimates
         # interpolation error. Local donor bounds prevent ringing/overshoot.
+        # Hot loop: locals and inline clamps instead of attribute lookups and min/max.
         w, h = self.width, self.height
-        old = self.density
-        forward, donors = [], []
-        for i in range(len(old)):
-            x, y = i % w - self.vx[i] * dt, i // w - self.vy[i] * dt
-            ix, iy = math.floor(x), math.floor(y)
-            fx, fy = x - ix, y - iy
-            if self.mode == "smoke":
-                # Open vertical plume: no top-to-bottom recirculation.
-                a, b = min(h - 1, max(0, iy)) * w, min(h - 1, max(0, iy + 1)) * w
-            else:
-                a, b = (iy % h) * w, ((iy + 1) % h) * w
-            left, right = ix % w, (ix + 1) % w
-            q0, q1, q2, q3 = old[a + left], old[a + right], old[b + left], old[b + right]
-            forward.append((q0 * (1 - fx) + q1 * fx) * (1 - fy)
-                           + (q2 * (1 - fx) + q3 * fx) * fy)
-            donors.append((min(q0, q1, q2, q3), max(q0, q1, q2, q3)))
-        result = []
-        for i, value in enumerate(old):
-            x, y = i % w + self.vx[i] * dt, i // w + self.vy[i] * dt
-            ix, iy = math.floor(x), math.floor(y)
-            fx, fy = x - ix, y - iy
-            if self.mode == "smoke":
-                # Open vertical plume: no top-to-bottom recirculation.
-                a, b = min(h - 1, max(0, iy)) * w, min(h - 1, max(0, iy + 1)) * w
-            else:
-                a, b = (iy % h) * w, ((iy + 1) % h) * w
-            left, right = ix % w, (ix + 1) % w
-            reverse = ((forward[a + left] * (1 - fx) + forward[a + right] * fx) * (1 - fy)
-                       + (forward[b + left] * (1 - fx) + forward[b + right] * fx) * fy)
-            lo, hi = donors[i]
-            advected = min(hi, max(lo, forward[i] + .5 * (value - reverse)))
-            # Very slow renewal; no directional sharpening or global whitening.
-            renewed = advected + dt * .018 * (self.moisture[i] - advected)
-            if self.mode == "smoke":
-                y = (i // w + .5) / h
-                feed = max(0., (y - .87) / .13)
-                renewed += dt * feed * 1.5 * (self.moisture[i] - renewed)
-            result.append(max(0., min(1., renewed)))
+        old, vx, vy, moisture = self.density, self.vx, self.vy, self.moisture
+        smoke = self.mode == "smoke"
+        floor, top = math.floor, h - 1
+        n = len(old)
+        forward, lows, highs = [0.] * n, [0.] * n, [0.] * n
+        i = 0
+        for row in range(h):
+            for col in range(w):
+                x, y = col - vx[i] * dt, row - vy[i] * dt
+                ix, iy = floor(x), floor(y)
+                fx, fy = x - ix, y - iy
+                if smoke:
+                    # Open vertical plume: no top-to-bottom recirculation.
+                    a = (0 if iy < 0 else top if iy > top else iy) * w
+                    b = (0 if iy + 1 < 0 else top if iy + 1 > top else iy + 1) * w
+                else:
+                    a, b = (iy % h) * w, ((iy + 1) % h) * w
+                left, right = ix % w, (ix + 1) % w
+                q0, q1, q2, q3 = old[a + left], old[a + right], old[b + left], old[b + right]
+                forward[i] = ((q0 * (1 - fx) + q1 * fx) * (1 - fy)
+                              + (q2 * (1 - fx) + q3 * fx) * fy)
+                lo, hi = (q0, q1) if q0 <= q1 else (q1, q0)
+                lo2, hi2 = (q2, q3) if q2 <= q3 else (q3, q2)
+                lows[i] = lo if lo <= lo2 else lo2
+                highs[i] = hi if hi >= hi2 else hi2
+                i += 1
+        result = [0.] * n
+        i = 0
+        for row in range(h):
+            feed = max(0., ((row + .5) / h - .87) / .13) if smoke else 0.
+            for col in range(w):
+                x, y = col + vx[i] * dt, row + vy[i] * dt
+                ix, iy = floor(x), floor(y)
+                fx, fy = x - ix, y - iy
+                if smoke:
+                    a = (0 if iy < 0 else top if iy > top else iy) * w
+                    b = (0 if iy + 1 < 0 else top if iy + 1 > top else iy + 1) * w
+                else:
+                    a, b = (iy % h) * w, ((iy + 1) % h) * w
+                left, right = ix % w, (ix + 1) % w
+                reverse = ((forward[a + left] * (1 - fx) + forward[a + right] * fx) * (1 - fy)
+                           + (forward[b + left] * (1 - fx) + forward[b + right] * fx) * fy)
+                advected = forward[i] + .5 * (old[i] - reverse)
+                lo, hi = lows[i], highs[i]
+                if advected < lo:
+                    advected = lo
+                if advected > hi:
+                    advected = hi
+                # Very slow renewal; no directional sharpening or global whitening.
+                renewed = advected + dt * .018 * (moisture[i] - advected)
+                if smoke:
+                    renewed += dt * feed * 1.5 * (moisture[i] - renewed)
+                result[i] = 0. if renewed < 0. else 1. if renewed > 1. else renewed
+                i += 1
         self.density = result
 
     def stable_tones(self):
@@ -457,7 +476,7 @@ class Field:
             start = end
         return tones
 
-    def render(self, t, levels):
+    def render(self, t, levels, max_step=.055):
         procedural = self.mode in ("taichi", "matrix")
         if procedural:
             self.density = self.pattern_density(t)
@@ -465,7 +484,7 @@ class Field:
             elapsed = max(0., min(.3, t - self.last_t))
             if elapsed and t - self.wind_t >= .35:
                 self.update_wind(t)
-            steps = max(1, math.ceil(elapsed / .055))
+            steps = max(1, math.ceil(elapsed / max_step))
             if elapsed:
                 for _ in range(steps):
                     self.advance(elapsed / steps)
@@ -587,9 +606,16 @@ def run(screen, args, curses):
     colors = ColorPairs(curses, len(attrs), args.mono)
     palette_name = args.color or PALETTE_NAMES[0]
     colored = bool(args.color) and colors.bands > 0
-    field = None
     count, seed, mode = args.count, 0, args.mode
     speed, paused, hud, show_help = args.speed, False, not args.no_hud, False
+    # Ask the terminal to report focus changes so an unfocused window can drop to
+    # --idle-fps. Only when terminfo names the reports (kxIN / kxOUT); otherwise
+    # the raw sequence would start with Esc and quit.
+    focused = True
+    if curses.tigetstr("kxIN"):
+        sys.stdout.write(FOCUS_REPORTING_ON)
+        sys.stdout.flush()
+    field = None
     t, previous = 0.0, time.monotonic()
     dirty = True
     while True:
@@ -598,7 +624,10 @@ def run(screen, args, curses):
         previous = started
         key = screen.getch()
         while key != -1:
-            if key == 27 and show_help:
+            name = curses.keyname(key) if key > 255 else b""
+            if name in (b"kxIN", b"kxOUT"):
+                focused = name == b"kxIN"
+            elif key == 27 and show_help:
                 show_help = False
                 dirty = True
             elif key in (ord('q'), ord('Q'), 27):
@@ -655,7 +684,8 @@ def run(screen, args, curses):
         if dirty:
             if colored:
                 colors.select(palette_name)
-            for y, row in enumerate(field.render(t, len(attrs))):
+            # Unfocused windows take one coarse transport step per frame to save CPU.
+            for y, row in enumerate(field.render(t, len(attrs), .055 if focused else .3)):
                 if colored:
                     py, offset = (y + .5) / art_height, y * width
                     cells = [attrs[0] if shade == 0 else colors.attr(
@@ -690,7 +720,8 @@ def run(screen, args, curses):
                 draw_help(screen, curses, help_lines(mode, count, speed, paused, color_label), width, height, attrs[-1])
             screen.refresh()
             dirty = False
-        time.sleep(max(0, 1 / args.fps - (time.monotonic() - started)))
+        fps = args.fps if focused else min(args.fps, args.idle_fps)
+        time.sleep(max(0, 1 / fps - (time.monotonic() - started)))
 
 
 def main():
@@ -699,7 +730,9 @@ def main():
     parser.add_argument('--count', type=int, choices=range(1, 10), default=3, help='number of vortices (default: 3)')
     parser.add_argument('--aspect', type=bounded_float(.2, 1), default=.5, help='character width / height, default .5')
     parser.add_argument('--speed', type=bounded_float(.1, 3), default=.7)
-    parser.add_argument('--fps', type=bounded_float(1, 60), default=30)
+    parser.add_argument('--fps', type=bounded_float(1, 60), default=15, help='target frame rate (default: 15)')
+    parser.add_argument('--idle-fps', type=bounded_float(1, 60), default=5,
+                        help='frame rate while the terminal window is unfocused (default: 5)')
     parser.add_argument('--no-hud', action='store_true', help='start with only the animated field')
     parser.add_argument('--mono', action='store_true', help='use monochrome terminal attributes')
     parser.add_argument('--color', choices=PALETTE_NAMES, help='start in a color palette (needs 256 colors)')
@@ -727,6 +760,8 @@ def main():
     except curses.error as error:
         parser.exit(1, f'Terminal initialization failed: {error}\n')
     finally:
+        sys.stdout.write(FOCUS_REPORTING_OFF)
+        sys.stdout.flush()
         signal.signal(signal.SIGTERM, old_term)
         termios.tcsetattr(terminal_fd, termios.TCSADRAIN, terminal_settings)
 

@@ -47,6 +47,8 @@ Inside Vortex:
 | **I** | Status line |
 | **Q** / **Esc** | Quit (Esc closes the help panel first) |
 
+Vortex is pure Python, so it keeps one CPU core partly busy while animating: roughly 20% for the default floating window at 15 fps. When the window loses focus it drops to 5 fps (about 7%), and **Space** (still) or **Q** stops it entirely.
+
 The window uses the app id `org.omarchy.vortex`, so Hyprland window rules can target it.
 
 ## Settings
@@ -93,7 +95,7 @@ This removes the widget from the bar and deletes `~/.config/omarchy/plugins/c4pt
 python3 vortex.py --mode cyclone --color psychedelic
 ```
 
-Options: `--mode`, `--count 1-9`, `--speed 0.1-3`, `--fps 1-60`, `--aspect 0.2-1` (character width / height), `--color PALETTE`, `--no-hud`, `--mono`. Works on Linux and macOS.
+Options: `--mode`, `--count 1-9`, `--speed 0.1-3`, `--fps 1-60` (default 15), `--idle-fps 1-60` (default 5, used while the window is unfocused), `--aspect 0.2-1` (character width / height), `--color PALETTE`, `--no-hud`, `--mono`. Works on Linux and macOS.
 
 ## Tests
 
