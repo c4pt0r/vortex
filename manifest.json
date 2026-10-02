@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "c4pt0r.vortex",
   "name": "Vortex",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "c4pt0r",
   "license": "MIT",
   "description": "A bar button that opens thirteen animated ASCII fluid patterns (cyclone, ocean, smoke, Jupiter, matrix...) in your terminal, in monochrome or six color palettes.",
@@ -23,7 +23,8 @@
       "count": 3,
       "speed": "0.7",
       "color": "off",
-      "fullscreen": false,
+      "window": "float",
+      "size": "small",
       "hud": false,
       "mono": false
     },
@@ -90,10 +91,28 @@
         "description": "P toggles color and [ ] cycles palettes inside vortex."
       },
       {
-        "key": "fullscreen",
-        "type": "boolean",
-        "label": "Open fullscreen",
-        "defaultValue": false
+        "key": "window",
+        "type": "enum",
+        "label": "Window",
+        "options": [
+          "float",
+          "tiled",
+          "fullscreen"
+        ],
+        "defaultValue": "float",
+        "description": "float opens a centered floating window."
+      },
+      {
+        "key": "size",
+        "type": "enum",
+        "label": "Floating size",
+        "options": [
+          "small",
+          "medium",
+          "large"
+        ],
+        "defaultValue": "small",
+        "description": "Share of the monitor: 50%, 65% or 80%."
       },
       {
         "key": "hud",

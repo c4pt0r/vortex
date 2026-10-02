@@ -1,41 +1,77 @@
 #!/bin/bash
 
 # Open vortex.py in its own terminal window. Focuses an existing vortex window
-# instead of stacking another; --fullscreen makes a new window fullscreen.
+# instead of stacking another.
+#   --window float|tiled|fullscreen   (default float: a centered floating window)
+#   --size small|medium|large         floating size as a share of the monitor
 
 app_id=org.omarchy.vortex
 vortex="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/vortex.py"
 
-fullscreen=0
+window=float
+size=small
 args=()
-for arg in "$@"; do
-  if [[ $arg == --fullscreen ]]; then fullscreen=1; else args+=("$arg"); fi
+while (($#)); do
+  case $1 in
+  --window) window=$2; shift 2 ;;
+  --size) size=$2; shift 2 ;;
+  --fullscreen) window=fullscreen; shift ;;
+  *) args+=("$1"); shift ;;
+  esac
 done
+
+case $size in
+large) share=80 ;;
+medium) share=65 ;;
+*) share=50 ;;
+esac
+
+hypr() {
+  hyprctl dispatch "$1" >/dev/null 2>&1 || hyprctl dispatch $2 >/dev/null
+}
 
 existing=$(hyprctl clients -j | jq -r --arg c "$app_id" 'map(select(.class == $c))[0].address // empty')
 if [[ -n $existing ]]; then
-  hyprctl dispatch "hl.dsp.focus({ window = \"address:$existing\" })" >/dev/null 2>&1 ||
-    hyprctl dispatch focuswindow "address:$existing" >/dev/null
+  hypr "hl.dsp.focus({ window = \"address:$existing\" })" "focuswindow address:$existing"
   exit 0
 fi
 
-if ((fullscreen)); then
+if [[ $window != tiled ]]; then
   # Listen before spawning so a fast terminal cannot open before we are watching.
   exec {events}< <(socat -U - "UNIX-CONNECT:$XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/.socket2.sock")
 fi
 
 omarchy-launch-tui --app-id="$app_id" python3 "$vortex" "${args[@]}" &
 
-((fullscreen)) || exit 0
+[[ $window == tiled ]] && exit 0
 
+address=""
 deadline=$((SECONDS + 5))
 while ((SECONDS < deadline)) && IFS= read -r -t $((deadline - SECONDS)) -u "$events" line; do
-  [[ $line == openwindow\>\>*,"$app_id",* ]] || continue
-  address="0x${line#openwindow>>}"
-  address="${address%%,*}"
-  hyprctl dispatch "hl.dsp.focus({ window = \"address:$address\" })" >/dev/null 2>&1 ||
-    hyprctl dispatch focuswindow "address:$address" >/dev/null
-  hyprctl dispatch 'hl.dsp.window.fullscreen({ mode = "fullscreen" })' >/dev/null 2>&1 ||
-    hyprctl dispatch fullscreen 0 >/dev/null
-  break
+  if [[ $line == openwindow\>\>*,"$app_id",* ]]; then
+    address="0x${line#openwindow>>}"
+    address="${address%%,*}"
+    break
+  fi
 done
+[[ -n $address ]] || exit 0
+target="address:$address"
+
+if [[ $window == fullscreen ]]; then
+  hypr "hl.dsp.focus({ window = \"$target\" })" "focuswindow $target"
+  hypr 'hl.dsp.window.fullscreen({ mode = "fullscreen" })' "fullscreen 0"
+  exit 0
+fi
+
+# Center a floating window in the usable (non-bar) area of its monitor.
+monitor=$(hyprctl -j clients | jq -r --arg a "$address" 'map(select(.address == $a))[0].monitor')
+read -r x y w h < <(hyprctl -j monitors | jq -r --argjson id "${monitor:-0}" --argjson share "$share" '
+  map(select(.id == $id))[0]
+  | (.width / .scale - .reserved[0] - .reserved[2]) as $uw
+  | (.height / .scale - .reserved[1] - .reserved[3]) as $uh
+  | ($uw * $share / 100 | floor) as $w | ($uh * $share / 100 | floor) as $h
+  | "\(.x + .reserved[0] + (($uw - $w) / 2 | floor)) \(.y + .reserved[1] + (($uh - $h) / 2 | floor)) \($w) \($h)"')
+[[ -n $h ]] || exit 0
+hypr "hl.dsp.window.float({ action = \"enable\", window = \"$target\" })" "setfloating $target"
+hypr "hl.dsp.window.resize({ window = \"$target\", x = $w, y = $h })" "resizewindowpixel exact $w $h,$target"
+hypr "hl.dsp.window.move({ window = \"$target\", x = $x, y = $y })" "movewindowpixel exact $x $y,$target"

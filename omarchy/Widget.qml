@@ -23,7 +23,10 @@ BarWidget {
     var args = [launcher, "--mode", chosenMode, "--count", count, "--speed", speed]
     var color = setting("color", "off")
     if (palettes.indexOf(color) >= 0) args.push("--color", color)
-    if (setting("fullscreen", false)) args.push("--fullscreen")
+    var windowMode = setting("window", setting("fullscreen", false) ? "fullscreen" : "float")
+    args.push("--window", ["float", "tiled", "fullscreen"].indexOf(windowMode) >= 0 ? windowMode : "float")
+    var size = setting("size", "small")
+    args.push("--size", ["small", "medium", "large"].indexOf(size) >= 0 ? size : "small")
     if (!setting("hud", false)) args.push("--no-hud")
     if (setting("mono", false)) args.push("--mono")
     if (root.bar) root.bar.run(args.map(shellQuote).join(" "))

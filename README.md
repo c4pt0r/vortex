@@ -13,7 +13,7 @@ Everything below ships with a standard Omarchy install:
 - Omarchy with shell plugins (`omarchy plugin` commands)
 - Python 3.9+ with the standard `curses` module
 - A terminal launched through `xdg-terminal-exec` (Foot, Alacritty, Ghostty, Kitty)
-- `hyprctl`, `jq` and `socat`, used by the launcher to focus an existing window and to go fullscreen
+- `hyprctl`, `jq` and `socat`, used by the launcher to focus an existing window and to float, center or fullscreen a new one
 
 Color needs a 256-color terminal. No packages are installed and nothing runs with `sudo`.
 
@@ -27,7 +27,7 @@ The widget lands in the right section of the bar. Move it with `omarchy bar move
 
 ## Use
 
-- **Left click**: open the configured pattern.
+- **Left click**: open the configured pattern in a centered floating window.
 - **Right click**: open a random pattern.
 - Clicking while Vortex is open focuses the existing window.
 
@@ -54,7 +54,7 @@ The window uses the app id `org.omarchy.vortex`, so Hyprland window rules can ta
 Settings are fields on the widget's entry in `~/.config/omarchy/shell.json`:
 
 ```json
-{ "id": "c4pt0r.vortex", "mode": "jupiter", "count": 3, "speed": "0.7", "color": "deepsea", "fullscreen": false, "hud": false, "mono": false }
+{ "id": "c4pt0r.vortex", "mode": "jupiter", "count": 3, "speed": "0.7", "color": "deepsea", "window": "float", "size": "medium", "hud": false, "mono": false }
 ```
 
 | Key | Values | Default |
@@ -63,7 +63,8 @@ Settings are fields on the widget's entry in `~/.config/omarchy/shell.json`:
 | `count` | 1–9 | `3` |
 | `speed` | `0.3`, `0.5`, `0.7`, `1.0`, `1.5`, `2.0` | `0.7` |
 | `color` | `off` or a palette name | `off` |
-| `fullscreen` | open fullscreen | `false` |
+| `window` | `float` (centered), `tiled`, `fullscreen` | `float` |
+| `size` | floating size: `small` (50% of the monitor), `medium` (65%), `large` (80%) | `small` |
 | `hud` | show the status line | `false` |
 | `mono` | basic monochrome attributes | `false` |
 
