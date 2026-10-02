@@ -1,0 +1,41 @@
+#!/bin/bash
+
+# Open vortex.py in its own terminal window. Focuses an existing vortex window
+# instead of stacking another; --fullscreen makes a new window fullscreen.
+
+app_id=org.omarchy.vortex
+vortex="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/vortex.py"
+
+fullscreen=0
+args=()
+for arg in "$@"; do
+  if [[ $arg == --fullscreen ]]; then fullscreen=1; else args+=("$arg"); fi
+done
+
+existing=$(hyprctl clients -j | jq -r --arg c "$app_id" 'map(select(.class == $c))[0].address // empty')
+if [[ -n $existing ]]; then
+  hyprctl dispatch "hl.dsp.focus({ window = \"address:$existing\" })" >/dev/null 2>&1 ||
+    hyprctl dispatch focuswindow "address:$existing" >/dev/null
+  exit 0
+fi
+
+if ((fullscreen)); then
+  # Listen before spawning so a fast terminal cannot open before we are watching.
+  exec {events}< <(socat -U - "UNIX-CONNECT:$XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/.socket2.sock")
+fi
+
+omarchy-launch-tui --app-id="$app_id" python3 "$vortex" "${args[@]}" &
+
+((fullscreen)) || exit 0
+
+deadline=$((SECONDS + 5))
+while ((SECONDS < deadline)) && IFS= read -r -t $((deadline - SECONDS)) -u "$events" line; do
+  [[ $line == openwindow\>\>*,"$app_id",* ]] || continue
+  address="0x${line#openwindow>>}"
+  address="${address%%,*}"
+  hyprctl dispatch "hl.dsp.focus({ window = \"address:$address\" })" >/dev/null 2>&1 ||
+    hyprctl dispatch focuswindow "address:$address" >/dev/null
+  hyprctl dispatch 'hl.dsp.window.fullscreen({ mode = "fullscreen" })' >/dev/null 2>&1 ||
+    hyprctl dispatch fullscreen 0 >/dev/null
+  break
+done

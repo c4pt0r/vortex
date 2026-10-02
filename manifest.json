@@ -1,0 +1,112 @@
+{
+  "schemaVersion": 1,
+  "id": "c4pt0r.vortex",
+  "name": "Vortex",
+  "version": "0.1.0",
+  "author": "c4pt0r",
+  "license": "MIT",
+  "description": "A bar button that opens thirteen animated ASCII fluid patterns (cyclone, ocean, smoke, Jupiter, matrix...) in your terminal, in monochrome or six color palettes.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "omarchy/Widget.qml"
+  },
+  "barWidget": {
+    "displayName": "Vortex",
+    "description": "Left click opens vortex.py in a terminal; right click opens a random pattern. Press H inside for help.",
+    "category": "Fun",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "mode": "cyclone",
+      "count": 3,
+      "speed": "0.7",
+      "color": "off",
+      "fullscreen": false,
+      "hud": false,
+      "mono": false
+    },
+    "schema": [
+      {
+        "key": "mode",
+        "type": "enum",
+        "label": "Pattern",
+        "options": [
+          "random",
+          "ocean",
+          "monsoon",
+          "cyclone",
+          "jupiter",
+          "smoke",
+          "river",
+          "shear",
+          "turbulence",
+          "taichi",
+          "solution",
+          "whirlpool",
+          "nebula",
+          "matrix"
+        ],
+        "defaultValue": "cyclone"
+      },
+      {
+        "key": "count",
+        "type": "integer",
+        "label": "Vortex count",
+        "min": 1,
+        "max": 9,
+        "step": 1,
+        "defaultValue": 3
+      },
+      {
+        "key": "speed",
+        "type": "enum",
+        "label": "Speed",
+        "options": [
+          "0.3",
+          "0.5",
+          "0.7",
+          "1.0",
+          "1.5",
+          "2.0"
+        ],
+        "defaultValue": "0.7"
+      },
+      {
+        "key": "color",
+        "type": "enum",
+        "label": "Color palette",
+        "options": [
+          "off",
+          "psychedelic",
+          "acid",
+          "sunset",
+          "aurora",
+          "deepsea",
+          "phosphor"
+        ],
+        "defaultValue": "off",
+        "description": "P toggles color and [ ] cycles palettes inside vortex."
+      },
+      {
+        "key": "fullscreen",
+        "type": "boolean",
+        "label": "Open fullscreen",
+        "defaultValue": false
+      },
+      {
+        "key": "hud",
+        "type": "boolean",
+        "label": "Show status line",
+        "defaultValue": false
+      },
+      {
+        "key": "mono",
+        "type": "boolean",
+        "label": "Monochrome attributes",
+        "defaultValue": false
+      }
+    ]
+  }
+}
