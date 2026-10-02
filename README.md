@@ -74,7 +74,10 @@ The plugin never edits your configuration; it only reads these fields.
 
 ```bash
 omarchy plugin update c4pt0r.vortex
+omarchy restart shell
 ```
+
+The shell can keep running the previous widget code after an update even though it reports a reload, so restart it to load the new version.
 
 ## Remove
 
