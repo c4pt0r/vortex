@@ -13,9 +13,10 @@ Everything below ships with a standard Omarchy install:
 - Omarchy with shell plugins (`omarchy plugin` commands)
 - Python 3.9+ with the standard `curses` module
 - A terminal launched through `xdg-terminal-exec` (Foot, Alacritty, Ghostty, Kitty)
+- Optional: a C compiler (`cc`, from Omarchy's `base-devel`). The first launch compiles `vortex_accel.c` into `~/.cache/vortex/`, which makes Vortex about three times lighter on the CPU. Without one it runs in pure Python with identical output; `VORTEX_PURE_PYTHON=1` forces that.
 - `hyprctl`, `jq` and `socat`, used by the launcher to focus an existing window and to float, center or fullscreen a new one
 
-Color needs a 256-color terminal. No packages are installed and nothing needs root privileges.
+Color needs a 256-color terminal. No packages are installed and nothing needs root privileges. The only file written outside the plugin is the compiled kernel cache in `~/.cache/vortex/`.
 
 ## Install
 
@@ -47,7 +48,7 @@ Inside Vortex:
 | **I** | Status line |
 | **Q** / **Esc** | Quit (Esc closes the help panel first) |
 
-Vortex is pure Python, so it keeps one CPU core partly busy while animating: roughly 20% for the default floating window at 15 fps. When the window loses focus it drops to 5 fps (about 7%), and **Space** (still) or **Q** stops it entirely.
+CPU use for the default floating window at 15 fps is about 6% of one core with the C kernels (about 18% in pure Python). When the window loses focus it drops to 5 fps (about 2%), and **Space** (still) or **Q** stops it entirely.
 
 The window uses the app id `org.omarchy.vortex`, so Hyprland window rules can target it.
 

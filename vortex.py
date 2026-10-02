@@ -13,6 +13,8 @@ macOS and Linux: no packages required. Fills the current terminal window.
 
 import argparse
 import math
+import re
+from array import array
 import os
 import signal
 import sys
@@ -34,6 +36,9 @@ def noise(x, y):
 
 
 MODES = ("ocean", "monsoon", "cyclone", "jupiter", "smoke", "river", "shear", "turbulence", "taichi", "solution", "whirlpool", "nebula", "matrix")
+DIGITS = "0123456789"
+SAME_KEY_RUNS = re.compile(rb"(.)\1*", re.S)
+
 # Terminal focus reports (xterm mode 1004), which curses delivers as kxIN / kxOUT.
 FOCUS_REPORTING_ON, FOCUS_REPORTING_OFF = "\033[?1004h", "\033[?1004l"
 MODE_KEYS = {ord("o"): "ocean", ord("m"): "monsoon",
@@ -89,6 +94,96 @@ def nearest_xterm(rgb):
     return min(XTERM_COLORS, key=lambda c: sum((a - b) ** 2 for a, b in zip(c[1], rgb)))[0]
 
 
+ACCEL_KERNELS = {
+    "vx_advance": "iiid" + "p" * 8,
+    "vx_stable_tones": "i" + "p" * 5,
+    "vx_update_wind": "iipddiiidipppp",
+    "vx_taichi": "ippddd" + "p",
+    "vx_matrix": "iiiidp",
+    "vx_cells": "iiidpppp",
+    "vx_color_keys": "iiddii" + "ppp",
+}
+_accel = None
+
+
+def load_accel():
+    """The optional C kernels in vortex_accel.c, or None to stay in pure Python.
+
+    Compiled once with the system C compiler into ~/.cache/vortex, keyed by the
+    source hash, and trusted only after matching the Python path exactly.
+    VORTEX_PURE_PYTHON=1 disables it.
+    """
+    global _accel
+    if _accel is None:
+        _accel = False
+        if not os.environ.get("VORTEX_PURE_PYTHON"):
+            try:
+                lib = _build_accel()
+                if lib is not None and _accel_matches_python(lib):
+                    _accel = lib
+            except Exception:
+                pass
+    return _accel or None
+
+
+def _build_accel():
+    import ctypes
+    import hashlib
+    import platform
+    import shutil
+    import subprocess
+    import tempfile
+    from pathlib import Path
+    source = Path(__file__).resolve().with_name("vortex_accel.c")
+    if not source.is_file():
+        return None
+    digest = hashlib.sha256(source.read_bytes() + platform.machine().encode()).hexdigest()[:16]
+    cache = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "vortex"
+    library = cache / f"vortex_accel-{digest}.so"
+    if not library.exists():
+        compiler = os.environ.get("CC") or shutil.which("cc") or shutil.which("gcc") or shutil.which("clang")
+        if not compiler:
+            return None
+        cache.mkdir(parents=True, exist_ok=True)
+        fd, partial = tempfile.mkstemp(dir=cache, suffix=".so")
+        os.close(fd)
+        try:
+            # -ffp-contract=off keeps results bit-identical to Python (no fused multiply-add).
+            subprocess.run([compiler, "-O2", "-shared", "-fPIC", "-ffp-contract=off",
+                            "-o", partial, str(source), "-lm"],
+                           check=True, capture_output=True, timeout=60)
+            os.replace(partial, library)
+        finally:
+            if os.path.exists(partial):
+                os.unlink(partial)
+    lib = ctypes.CDLL(str(library))
+    types = {"i": ctypes.c_int, "d": ctypes.c_double, "p": ctypes.c_void_p}
+    for name, signature in ACCEL_KERNELS.items():
+        kernel = getattr(lib, name)
+        kernel.argtypes = [types[code] for code in signature]
+        kernel.restype = None
+    return lib
+
+
+def _accel_matches_python(lib):
+    # Frames must match exactly. Density must too, except taichi, where libm's
+    # hypot may differ from Python's correctly rounded math.hypot by one ulp; that
+    # pattern is recomputed every frame, so the difference never accumulates.
+    for mode in MODES:
+        fields = [Field(13, 7, 3, 2, .5, mode, accel=accel) for accel in (lib, None)]
+        frames = [[(f.frame(step * .37, 18), f.color_keys(step * .37, f.frame(step * .37, 18)[1], 18, 12))
+                   for step in range(6)] for f in fields]
+        tolerance = 1e-12 if mode == "taichi" else 0.
+        if frames[0] != frames[1] or any(abs(a - b) > tolerance
+                                         for a, b in zip(fields[0].density, fields[1].density)):
+            return False
+    return True
+
+
+def _address(buffer):
+    return buffer.buffer_info()[0]
+
+
 class Field:
     """Artistic cloud-density advection, not a meteorological forecast model.
 
@@ -97,10 +192,13 @@ class Field:
     detail lost to interpolation. Coordinates account for terminal cell shape.
     """
 
-    def __init__(self, width, height, count=3, seed=0, aspect=.5, mode="cyclone"):
+    def __init__(self, width, height, count=3, seed=0, aspect=.5, mode="cyclone", accel=True):
         import random
         if mode not in MODES:
             raise ValueError("unknown flow mode")
+        # accel: True loads the C kernels when available, None forces pure Python,
+        # or a loaded library (used by the self-check).
+        self.accel = load_accel() if accel is True else accel
         self.mode = mode
         self.width, self.height = width, height
         self.count, self.seed, self.aspect = count, seed, aspect
@@ -238,6 +336,15 @@ class Field:
 
     def pattern_density(self, t):
         """Mist-veiled yin-yang flow and discrete falling-code trails."""
+        if self.accel:
+            out = array("d", bytes(8 * self.width * self.height))
+            if self.mode == "matrix":
+                self.accel.vx_matrix(self.width, self.height, self.count, self.seed, t, _address(out))
+            else:
+                self.accel.vx_taichi(len(out), _address(self._coordinate_array()),
+                                     _address(self._cached_array("lattice")), t, self.world_width,
+                                     max(.001, min(.43, self.world_width * .43)), _address(out))
+            return out.tolist()
         result = []
         radius = max(.001, min(.43, self.world_width * .43))
         angle = t * .065
@@ -303,104 +410,154 @@ class Field:
         if self.mode == "jupiter":
             cx, cy, radius, _, direction = self.centers[0]
             centers[0] = (cx + radius * .04 * math.sin(t * .035), cy, radius, direction)
+        if self.accel:
+            jupiter = self.mode == "jupiter"
+            stencils = array("d", [value for index, (cx, cy, radius, direction) in enumerate(centers)
+                                   for value in (cx, cy, radius * radius, direction,
+                                                 1.9 if jupiter and index == 0 else 1.,
+                                                 1. if jupiter and index == 0 else 0.)])
+            main = array("d", self.centers[0][:3] if self.centers else (0., 0., 1.))
+            n = self.width * self.height
+            vx, vy = array("d", bytes(8 * n)), array("d", bytes(8 * n))
+            self.accel.vx_update_wind(MODES.index(self.mode), n, _address(self._coordinate_array()), t,
+                                      self.world_width, self.count, self.seed, self.height, self.aspect,
+                                      len(centers), _address(stencils), _address(main), _address(vx), _address(vy))
+            self.vx, self.vy = vx.tolist(), vy.tolist()
+            self._wind_arrays = (self.vx, self.vy, vx, vy)
+            return
         vx, vy = [], []
+        mode, world_width, count, seed = self.mode, self.world_width, self.count, self.seed
+        height, aspect = self.height, self.aspect
+        sin, cos, exp, tanh = math.sin, math.cos, math.exp, math.tanh
+        jupiter = mode == "jupiter"
+        stencils = [(cx, cy, radius * radius, direction, 1.9 if jupiter and index == 0 else 1., jupiter and index == 0)
+                    for index, (cx, cy, radius, direction) in enumerate(centers)]
         # An artistic seasonal cycle, deliberately compressed to 80 sim seconds.
-        season = math.cos(t * math.tau / 80)
+        season = cos(t * math.tau / 80)
         for x, y in self.coordinates:
-            if self.mode == "ocean":
-                jet = y - .50 - .12 * math.sin(x * 4 - t * .025)
-                ux = .018 + .080 * math.exp(-(jet / .11) ** 2)
-                uy = .018 * math.cos(x * 4 - t * .025) * math.exp(-(jet / .2) ** 2)
+            if mode == "ocean":
+                jet = y - .50 - .12 * sin(x * 4 - t * .025)
+                ux = .018 + .080 * exp(-(jet / .11) ** 2)
+                uy = .018 * cos(x * 4 - t * .025) * exp(-(jet / .2) ** 2)
                 spin_scale, inward = .45, 0.
-            elif self.mode == "monsoon":
-                ux = season * (.072 + .020 * math.sin(y * 8))
-                uy = season * .025 + .014 * math.sin(x * 6 - t * .06)
+            elif mode == "monsoon":
+                ux = season * (.072 + .020 * sin(y * 8))
+                uy = season * .025 + .014 * sin(x * 6 - t * .06)
                 spin_scale, inward = .22, 0.
-            elif self.mode == "jupiter":
+            elif mode == "jupiter":
                 cx, cy, radius, _, _ = self.centers[0]
                 dx, dy = (x - cx) / 1.9, y - cy
-                skirt = math.exp(-(dx * dx + dy * dy) / (radius * radius) * .55)
+                skirt = exp(-(dx * dx + dy * dy) / (radius * radius) * .55)
                 bend = dy * .7 * skirt
                 slope = -dy * .7 * skirt * 1.1 * dx / (1.9 * radius * radius)
-                ux = .050 * math.sin((y + bend) * 24 + .35 * math.sin(x * 3 - t * .02))
-                uy = -slope * ux + .007 * math.sin(x * 7 + y * 5 + t * .03)
+                ux = .050 * sin((y + bend) * 24 + .35 * sin(x * 3 - t * .02))
+                uy = -slope * ux + .007 * sin(x * 7 + y * 5 + t * .03)
                 spin_scale, inward = .70, 0.
-            elif self.mode == "smoke":
-                axis = self.world_width * .5 + .06 * math.sin(y * 7 - t * .13)
-                plume = math.exp(-((x - axis) / (.08 + (1 - y) * .22)) ** 2)
-                ux = .022 * math.sin(y * 11 - t * .21) - (x - axis) * .035 * plume
+            elif mode == "smoke":
+                axis = world_width * .5 + .06 * sin(y * 7 - t * .13)
+                plume = exp(-((x - axis) / (.08 + (1 - y) * .22)) ** 2)
+                ux = .022 * sin(y * 11 - t * .21) - (x - axis) * .035 * plume
                 uy = -.018 - .080 * plume
                 spin_scale, inward = .36, 0.
-            elif self.mode == "river":
-                phase = x / self.world_width * 7
-                channel = .5 + .12 * math.sin(phase)
-                jet = math.exp(-((y - channel) / .22) ** 2)
+            elif mode == "river":
+                phase = x / world_width * 7
+                channel = .5 + .12 * sin(phase)
+                jet = exp(-((y - channel) / .22) ** 2)
                 ux = .022 + .11 * jet
-                uy = .12 * 7 / self.world_width * math.cos(phase) * ux
+                uy = .12 * 7 / world_width * cos(phase) * ux
                 # A smooth deflection splits the current, feeding a rippling wake.
-                dx, dy = x - self.world_width * .30, y - channel
-                obstacle = math.exp(-(dx / .10) ** 2 - (dy / .09) ** 2)
+                dx, dy = x - world_width * .30, y - channel
+                obstacle = exp(-(dx / .10) ** 2 - (dy / .09) ** 2)
                 ux *= 1 - .85 * obstacle
                 uy += dy * 1.8 * obstacle
                 spin_scale, inward = .58, 0.
-            elif self.mode == "shear":
-                mid = .5 + .035 * math.sin(x * 4 - t * .09)
-                ux = .063 * math.tanh((y - mid) / .075)
-                uy = .012 * math.sin(x / self.world_width * math.tau * self.count - t * .12)
+            elif mode == "shear":
+                mid = .5 + .035 * sin(x * 4 - t * .09)
+                ux = .063 * tanh((y - mid) / .075)
+                uy = .012 * sin(x / world_width * math.tau * count - t * .12)
                 spin_scale, inward = .88, 0.
-            elif self.mode == "turbulence":
+            elif mode == "turbulence":
                 # Curl of time-varying stream functions: interacting eddies at
                 # several scales, without a persistent central vortex marker.
                 ux, uy = 0., 0.
                 for scale, amplitude, rate in ((1., .055, .11), (2.1, .028, -.17), (4.3, .014, .23)):
-                    kx = math.tau * scale * (1 + self.count * .16) / self.world_width
+                    kx = math.tau * scale * (1 + count * .16) / world_width
                     ky = math.tau * scale
-                    a, b = x * kx + t * rate + self.seed, y * ky - t * rate * .73
+                    a, b = x * kx + t * rate + seed, y * ky - t * rate * .73
                     norm = max(kx, ky)
-                    ux += amplitude * ky / norm * math.sin(a) * math.cos(b)
-                    uy -= amplitude * kx / norm * math.cos(a) * math.sin(b)
+                    ux += amplitude * ky / norm * sin(a) * cos(b)
+                    uy -= amplitude * kx / norm * cos(a) * sin(b)
                 spin_scale, inward = 0., 0.
-            elif self.mode == "solution":
-                ux = .025 * math.sin(y * math.tau + t * .06)
-                uy = .030 * math.sin(x * 4 - t * .04)
+            elif mode == "solution":
+                ux = .025 * sin(y * math.tau + t * .06)
+                uy = .030 * sin(x * 4 - t * .04)
                 spin_scale, inward = .28, 0.
-            elif self.mode == "whirlpool":
+            elif mode == "whirlpool":
                 ux, uy, spin_scale, inward = 0., 0., 1.3, .055
-            elif self.mode == "nebula":
-                ux = .008 + .018 * math.sin(y * 8 + t * .035)
-                uy = .014 * math.sin(x * 5 - t * .028)
+            elif mode == "nebula":
+                ux = .008 + .018 * sin(y * 8 + t * .035)
+                uy = .014 * sin(x * 5 - t * .028)
                 spin_scale, inward = .18, 0.
-            elif self.mode in ("taichi", "matrix"):
-                ux, uy, spin_scale, inward = 0., (0. if self.mode == "taichi" else .2), 0., 0.
+            elif mode in ("taichi", "matrix"):
+                ux, uy, spin_scale, inward = 0., (0. if mode == "taichi" else .2), 0., 0.
             else:
-                ux = .016 + .008 * math.sin(y * 9 + t * .045)
-                uy = .005 * math.sin(x * 8 - t * .035)
+                ux = .016 + .008 * sin(y * 9 + t * .045)
+                uy = .005 * sin(x * 8 - t * .035)
                 spin_scale, inward = .90, .014
-            for index, (cx, cy, radius, direction) in enumerate(centers):
-                stretch = 1.9 if self.mode == "jupiter" and index == 0 else 1.
+            for cx, cy, radius2, direction, stretch, sheltered in stencils:
                 dx, dy = (x - cx) / stretch, y - cy
-                r2 = (dx * dx + dy * dy) / (radius * radius)
-                influence = math.exp(-r2 * .85)
-                if self.mode == "jupiter" and index == 0:
+                r2 = (dx * dx + dy * dy) / radius2
+                influence = exp(-r2 * .85)
+                if sheltered:
                     # Suppress crossing jets within the dominant closed oval.
-                    shelter = 1 - math.exp(-r2 * r2 * .8)
+                    shelter = 1 - exp(-r2 * r2 * .8)
                     ux *= shelter
                     uy *= shelter
                 spin = direction * spin_scale * influence
                 ux -= (dy * spin + dx * inward * influence) * stretch
                 uy += dx * spin - dy * inward * influence
-            vx.append(ux * self.height / self.aspect)
-            vy.append(uy * self.height)
+            vx.append(ux * height / aspect)
+            vy.append(uy * height)
         self.vx, self.vy = vx, vy
 
+    def _coordinate_array(self):
+        cached = getattr(self, "_coordinates", None)
+        if cached is None or cached[0] is not self.coordinates:
+            cached = (self.coordinates, array("d", [v for point in self.coordinates for v in point]))
+            self._coordinates = cached
+        return cached[1]
+
+    def _cached_array(self, name, typecode="d"):
+        # Arrays for inputs that rarely change; rebuilt if the list is replaced.
+        values = getattr(self, name)
+        cached = getattr(self, "_array_" + name, None)
+        if cached is None or cached[0] is not values:
+            cached = (values, array(typecode, values))
+            setattr(self, "_array_" + name, cached)
+        return cached[1]
+
     def advance(self, dt):
+        if self.accel:
+            n = len(self.density)
+            wind = getattr(self, "_wind_arrays", None)
+            if wind and wind[0] is self.vx and wind[1] is self.vy:
+                vx, vy = wind[2], wind[3]
+            else:
+                vx, vy = array("d", self.vx), array("d", self.vy)
+            old, scratch = array("d", self.density), array("d", bytes(8 * n * 4))
+            base, size = _address(scratch), 8 * n
+            self.accel.vx_advance(self.width, self.height, self.mode == "smoke", dt, _address(old),
+                                  _address(vx), _address(vy), _address(self._cached_array("moisture")),
+                                  base, base + size, base + 2 * size, base + 3 * size)
+            self.density = scratch[3 * n:].tolist()
+            return
         # Limited MacCormack transport: forward then backward tracing estimates
         # interpolation error. Local donor bounds prevent ringing/overshoot.
         # Hot loop: locals and inline clamps instead of attribute lookups and min/max.
         w, h = self.width, self.height
         old, vx, vy, moisture = self.density, self.vx, self.vy, self.moisture
         smoke = self.mode == "smoke"
-        floor, top = math.floor, h - 1
+        floor, top, last = math.floor, h - 1, w - 1
         n = len(old)
         forward, lows, highs = [0.] * n, [0.] * n, [0.] * n
         i = 0
@@ -414,11 +571,14 @@ class Field:
                     a = (0 if iy < 0 else top if iy > top else iy) * w
                     b = (0 if iy + 1 < 0 else top if iy + 1 > top else iy + 1) * w
                 else:
-                    a, b = (iy % h) * w, ((iy + 1) % h) * w
-                left, right = ix % w, (ix + 1) % w
+                    a = iy % h
+                    b = (a + 1 if a < top else 0) * w
+                    a *= w
+                left = ix % w
+                right = left + 1 if left < last else 0
                 q0, q1, q2, q3 = old[a + left], old[a + right], old[b + left], old[b + right]
-                forward[i] = ((q0 * (1 - fx) + q1 * fx) * (1 - fy)
-                              + (q2 * (1 - fx) + q3 * fx) * fy)
+                gx = 1 - fx
+                forward[i] = (q0 * gx + q1 * fx) * (1 - fy) + (q2 * gx + q3 * fx) * fy
                 lo, hi = (q0, q1) if q0 <= q1 else (q1, q0)
                 lo2, hi2 = (q2, q3) if q2 <= q3 else (q3, q2)
                 lows[i] = lo if lo <= lo2 else lo2
@@ -436,10 +596,14 @@ class Field:
                     a = (0 if iy < 0 else top if iy > top else iy) * w
                     b = (0 if iy + 1 < 0 else top if iy + 1 > top else iy + 1) * w
                 else:
-                    a, b = (iy % h) * w, ((iy + 1) % h) * w
-                left, right = ix % w, (ix + 1) % w
-                reverse = ((forward[a + left] * (1 - fx) + forward[a + right] * fx) * (1 - fy)
-                           + (forward[b + left] * (1 - fx) + forward[b + right] * fx) * fy)
+                    a = iy % h
+                    b = (a + 1 if a < top else 0) * w
+                    a *= w
+                left = ix % w
+                right = left + 1 if left < last else 0
+                gx = 1 - fx
+                reverse = ((forward[a + left] * gx + forward[a + right] * fx) * (1 - fy)
+                           + (forward[b + left] * gx + forward[b + right] * fx) * fy)
                 advected = forward[i] + .5 * (old[i] - reverse)
                 lo, hi = lows[i], highs[i]
                 if advected < lo:
@@ -461,6 +625,12 @@ class Field:
         than boosting the whole image. Equal densities share a tone, avoiding
         scan-line patterns in uniform regions. No per-frame random dithering.
         """
+        if self.accel:
+            n = len(self.density)
+            density, order, tones = array("d", self.density), array("i", bytes(4 * n)), array("d", bytes(8 * n))
+            self.accel.vx_stable_tones(n, _address(density), _address(self._cached_array("reference_tones")),
+                                       _address(self._cached_array("tone_prefix")), _address(order), _address(tones))
+            return tones.tolist()
         density = self.density
         order = sorted(range(len(density)), key=density.__getitem__)
         tones = [0.0] * len(order)
@@ -476,7 +646,7 @@ class Field:
             start = end
         return tones
 
-    def render(self, t, levels, max_step=.055):
+    def _simulate(self, t, max_step):
         procedural = self.mode in ("taichi", "matrix")
         if procedural:
             self.density = self.pattern_density(t)
@@ -489,22 +659,60 @@ class Field:
                 for _ in range(steps):
                     self.advance(elapsed / steps)
         self.last_t = t
-        tones = self.density if self.mode == "matrix" else self.stable_tones()
-        self.tones = tones
-        for y in range(self.height):
-            row = []
-            for x in range(self.width):
-                i = y * self.width + x
-                density = tones[i]
-                # Brightness follows transported cloud density only, never center positions.
-                brightness = density if self.mode == "matrix" else min(1., max(0., (density - .36) * 2.3))
-                if brightness < .065:
-                    row.append((' ' if brightness < .025 else '.', 0))
-                else:
-                    digit = (self.digits[i] + int(density * 17 + t * (8 if self.mode == "matrix" else .16))) % 10
-                    shade = min(levels - 1, int(brightness ** .85 * levels))
-                    row.append((str(digit), shade))
-            yield row
+        self.tones = self.density if self.mode == "matrix" else self.stable_tones()
+        return self.tones
+
+    def frame(self, t, levels, max_step=.055):
+        """Advance to time t; return the grid as (text, shades), one glyph and one shade byte per cell."""
+        tones = self._simulate(t, max_step)
+        matrix, n = self.mode == "matrix", len(tones)
+        drift = t * (8 if matrix else .16)
+        if self.accel:
+            # Keep every buffer referenced for the call; C only sees addresses.
+            source, chars, shades = array("d", tones), array("B", bytes(n)), array("B", bytes(n))
+            self.accel.vx_cells(n, matrix, levels, drift, _address(source),
+                                _address(self._cached_array("digits", "i")), _address(chars), _address(shades))
+            return chars.tobytes().decode("ascii"), shades.tobytes()
+        digits, top = self.digits, levels - 1
+        chars, shades = [], bytearray(n)
+        append = chars.append
+        for i, density in enumerate(tones):
+            # Brightness follows transported cloud density only, never center positions.
+            if matrix:
+                brightness = density
+            else:
+                brightness = (density - .36) * 2.3
+                brightness = 0. if brightness < 0. else 1. if brightness > 1. else brightness
+            if brightness < .065:
+                append(' ' if brightness < .025 else '.')
+            else:
+                shade = int(brightness ** .85 * levels)
+                append(DIGITS[(digits[i] + int(density * 17 + drift)) % 10])
+                shades[i] = shade if shade < top else top
+        return "".join(chars), bytes(shades)
+
+    def render(self, t, levels, max_step=.055):
+        """Advance to time t; return rows of (glyph, shade) cells."""
+        text, shades = self.frame(t, levels, max_step)
+        w = self.width
+        return [list(zip(text[i:i + w], shades[i:i + w])) for i in range(0, len(text), w)]
+
+    def color_keys(self, t, shades, levels, bands):
+        """Per-cell attribute index for color: 0 for blank cells, otherwise
+        levels + hue_band * levels + shade, with hue bands from palette_band."""
+        n = len(shades)
+        if self.accel:
+            tones, cells, keys = array("d", self.tones), array("B", shades), array("B", bytes(n))
+            self.accel.vx_color_keys(self.width, self.height, self.aspect, t, levels, bands,
+                                     _address(tones), _address(cells), _address(keys))
+            return keys.tobytes()
+        keys, w, h, aspect = bytearray(n), self.width, self.height, self.aspect
+        for i, shade in enumerate(shades):
+            if shade:
+                band = palette_band((i % w + .5) * aspect / h, (i // w + .5) / h, self.tones[i], t)
+                keys[i] = levels + band * bands // COLOR_BANDS * levels + shade
+        return bytes(keys)
+
 
 def palette(curses, mono):
     if not mono and curses.has_colors():
@@ -550,8 +758,9 @@ class ColorPairs:
                                       nearest_xterm(rgb), self.curses.COLOR_BLACK)
         self.name = name
 
-    def attr(self, band, shade):
-        return self.curses.color_pair(self.base + band * self.bands // COLOR_BANDS * self.levels + shade)
+    def table(self, gray):
+        """Attributes indexed by Field.color_keys: gray shades, then hue bands x shades."""
+        return gray + [self.curses.color_pair(self.base + key) for key in range(self.bands * self.levels)]
 
 
 def help_lines(mode, count, speed, paused, color):
@@ -685,28 +894,23 @@ def run(screen, args, curses):
             if colored:
                 colors.select(palette_name)
             # Unfocused windows take one coarse transport step per frame to save CPU.
-            for y, row in enumerate(field.render(t, len(attrs), .055 if focused else .3)):
-                if colored:
-                    py, offset = (y + .5) / art_height, y * width
-                    cells = [attrs[0] if shade == 0 else colors.attr(
-                        palette_band((x + .5) * field.aspect / art_height, py, field.tones[offset + x], t), shade)
-                        for x, (_, shade) in enumerate(row)]
-                else:
-                    cells = [attrs[shade] for _, shade in row]
-                # Batch neighboring characters with the same attribute.
-                x = 0
-                while x < width:
-                    attr = cells[x]
-                    end = x + 1
-                    while end < width and cells[end] == attr:
-                        end += 1
+            text, shades = field.frame(t, len(attrs), .055 if focused else .3)
+            if colored:
+                keys, table = field.color_keys(t, shades, len(attrs), colors.bands), colors.table(attrs)
+            else:
+                keys, table = shades, attrs
+            for y in range(art_height):
+                start = y * width
+                row_keys = keys[start:start + width]
+                # One addstr per run of neighboring cells with the same attribute.
+                for run in SAME_KEY_RUNS.finditer(row_keys):
+                    a, b = run.span()
                     try:
-                        screen.addstr(y, x, ''.join(c for c, _ in row[x:end]), attr)
+                        screen.addstr(y, a, text[start + a:start + b], table[row_keys[a]])
                     except curses.error:
                         # Writing the bottom-right cell can report ERR after drawing;
                         # a concurrent terminal resize can also invalidate coordinates.
                         pass
-                    x = end
             color_label = palette_name if colored else "mono"
             if hud and height > 1:
                 status = 'STILL' if paused else 'MOTION'

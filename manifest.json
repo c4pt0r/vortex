@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "c4pt0r.vortex",
   "name": "Vortex",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "author": "c4pt0r",
   "license": "MIT",
   "description": "A bar button that opens thirteen animated ASCII fluid patterns (cyclone, ocean, smoke, Jupiter, matrix...) in your terminal, in monochrome or six color palettes.",
